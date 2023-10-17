@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{ffi::CString, path::PathBuf};
 
 /// Represents a service
 #[derive(Serialize, Deserialize, Debug)]
@@ -8,6 +8,8 @@ pub struct Service {
     pub name: String,
     /// The path to the executable
     pub executable: PathBuf,
+    /// Arguments to the program
+    pub args: Option<Vec<CString>>,
 }
 
 impl Service {

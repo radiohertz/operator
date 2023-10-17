@@ -34,7 +34,9 @@ impl Engine {
         for service in self.service_files.iter() {
             info!("Handing service creation for {service:?}");
             match unsafe { fork() }.unwrap() {
-                ForkResult::Parent { .. } => {
+                ForkResult::Parent { child } => {
+                    let status = unsafe { nix::sys::wait::waitpid(child, None) }.unwrap();
+                    info!("Status {status:?}")
                     // TODO: book keep the process
                 }
                 ForkResult::Child => {
@@ -42,7 +44,17 @@ impl Engine {
 
                     let exe_path =
                         CString::new(service.executable.to_str().unwrap().to_string()).unwrap();
-                    unsafe { nix::libc::execv(exe_path.as_ptr(), core::ptr::null()) };
+
+                    let args = if let Some(ref args) = service.args {
+                        [exe_path.as_ptr()]
+                            .into_iter()
+                            .chain(args.iter().map(|arg| arg.as_ptr()))
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![exe_path.as_ptr()]
+                    };
+
+                    unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
                 }
             }
         }
