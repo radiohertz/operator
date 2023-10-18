@@ -1,4 +1,7 @@
-use nix::unistd::{fork, ForkResult};
+use nix::{
+    libc::{dup2, open, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO},
+    unistd::{fork, ForkResult},
+};
 
 use crate::service::Service;
 use log::info;
@@ -52,6 +55,18 @@ impl Engine {
                     } else {
                         vec![exe_path.as_ptr()]
                     };
+
+                    // create the log file for the service
+                    let stdout_file_path =
+                        CString::new(format!("/tmp/{}.log", service.name)).unwrap();
+                    let log_fd =
+                        unsafe { open(stdout_file_path.as_ptr(), O_WRONLY | O_CREAT | O_APPEND) };
+
+                    // set the stdout and stderr to the log file
+                    unsafe {
+                        dup2(log_fd, STDOUT_FILENO);
+                        dup2(log_fd, STDERR_FILENO);
+                    }
 
                     let _res = unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
                 }
