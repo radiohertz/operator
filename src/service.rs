@@ -13,12 +13,10 @@ pub struct Service {
 }
 
 impl Service {
-    pub const SERVICE_FILE_PATH: &str = "/tmp/op";
-
     /// Read the services files located in /tmp/op
-    pub fn read_service_files() -> std::io::Result<Vec<Service>> {
+    pub fn read_service_files(op_service_dir: &str) -> std::io::Result<Vec<Service>> {
         let mut services = vec![];
-        let dir = std::fs::read_dir(Self::SERVICE_FILE_PATH)?.flatten();
+        let dir = std::fs::read_dir(op_service_dir)?.flatten();
 
         for entry in dir {
             if entry.file_type().unwrap().is_file() {

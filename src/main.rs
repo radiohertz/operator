@@ -6,11 +6,8 @@ fn main() {
     // setup logging
     log::init().unwrap();
 
-    // fetch all the services files
-    let services = service::Service::read_service_files().unwrap();
-
     // create an engine
-    let engine = engine::Engine::new(services);
+    let engine = engine::Engine::new();
 
     engine.run();
 }

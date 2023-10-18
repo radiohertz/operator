@@ -1,10 +1,14 @@
 use nix::{
-    libc::{dup2, open, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO},
+    errno::{self, errno},
+    libc::{
+        dup2, open, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO, S_IRGRP, S_IRUSR,
+        S_IWGRP, S_IWUSR,
+    },
     unistd::{fork, ForkResult},
 };
 
 use crate::service::Service;
-use log::info;
+use log::{error, info};
 use std::{collections::HashMap, ffi::CString};
 
 #[allow(dead_code)]
@@ -20,14 +24,28 @@ pub enum ServiceStatus {
 pub struct Engine {
     service_files: Vec<Service>,
     _db: HashMap<Service, ServiceStatus>,
+    #[allow(dead_code)]
+    op_service_dir: String,
+    op_service_log_dir: String,
 }
 
 impl Engine {
     /// Create a new service runner engine
-    pub fn new(services: Vec<Service>) -> Self {
+    pub fn new() -> Self {
         info!("Creating a new Engine...");
+
+        let op_service_dir =
+            std::env::var("OP_SERVICE_DIR").unwrap_or_else(|_| "/tmp/op".to_string());
+
+        let op_service_log_dir =
+            std::env::var("OP_SERVICE_LOG_DIR").unwrap_or_else(|_| "/tmp/oplogs".to_string());
+
+        let service_files = Service::read_service_files(&op_service_dir).unwrap();
+
         Self {
-            service_files: services,
+            service_files,
+            op_service_dir,
+            op_service_log_dir,
             _db: HashMap::new(),
         }
     }
@@ -58,9 +76,27 @@ impl Engine {
 
                     // create the log file for the service
                     let stdout_file_path =
-                        CString::new(format!("/tmp/{}.log", service.name)).unwrap();
-                    let log_fd =
-                        unsafe { open(stdout_file_path.as_ptr(), O_WRONLY | O_CREAT | O_APPEND) };
+                        CString::new(format!("{}/{}.log", self.op_service_log_dir, service.name))
+                            .unwrap();
+                    let log_fd = unsafe {
+                        open(
+                            stdout_file_path.as_ptr(),
+                            O_WRONLY | O_CREAT | O_APPEND,
+                            (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) as std::ffi::c_uint,
+                        )
+                    };
+
+                    if log_fd == -1 {
+                        error!(
+                            "Failed to create log file {}",
+                            errno::Errno::from_i32(errno())
+                        );
+                    }
+
+                    info!(
+                        "Creating log file for {} at {:?} [FD {log_fd}]",
+                        service.name, stdout_file_path
+                    );
 
                     // set the stdout and stderr to the log file
                     unsafe {
