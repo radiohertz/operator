@@ -35,15 +35,14 @@ impl Engine {
             info!("Handing service creation for {service:?}");
             match unsafe { fork() }.unwrap() {
                 ForkResult::Parent { child } => {
-                    let status = unsafe { nix::sys::wait::waitpid(child, None) }.unwrap();
+                    let status = nix::sys::wait::waitpid(child, None).unwrap();
                     info!("Status {status:?}")
                     // TODO: book keep the process
                 }
                 ForkResult::Child => {
                     info!("{}: executing {:?}", service.name, service.executable);
 
-                    let exe_path =
-                        CString::new(service.executable.to_str().unwrap().to_string()).unwrap();
+                    let exe_path = CString::new(service.executable.to_str().unwrap()).unwrap();
 
                     let args = if let Some(ref args) = service.args {
                         [exe_path.as_ptr()]
@@ -54,7 +53,7 @@ impl Engine {
                         vec![exe_path.as_ptr()]
                     };
 
-                    unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
+                    let _res = unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
                 }
             }
         }
