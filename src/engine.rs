@@ -52,12 +52,24 @@ impl Engine {
     }
 
     extern "C" fn signal_handler(
-        sig: std::ffi::c_int,
-        sip: *mut siginfo_t,
-        ctx: *mut std::ffi::c_void,
+        _sig: std::ffi::c_int,
+        s_info: *mut siginfo_t,
+        _ctx: *mut std::ffi::c_void,
     ) {
-        let sinfo = unsafe { sip.as_ref() };
-        info!("Child is dead: {sinfo:?}");
+        let s_info = unsafe { s_info.as_ref() }.unwrap();
+        let data = unsafe {
+            comms::SignalData {
+                pid: s_info.si_pid(),
+                uid: s_info.si_uid(),
+                status: s_info.si_status(),
+                errno: s_info.si_errno,
+                code: s_info.si_code,
+            }
+        };
+
+        if let Err(e) = comms::write_to_pipe(data) {
+            error!("Failed to write to pipe: {e}");
+        }
     }
 
     /// Start the engine and manage the services
@@ -136,6 +148,81 @@ impl Engine {
 
         loop {
             std::thread::sleep(Duration::from_millis(200));
+
+            // read from the pipe for childs that have exited
+            match comms::read_from_pipe() {
+                Ok(val) => {
+                    // TODO: update child process status
+                    info!("Got signal data: {val:?}");
+                }
+                Err(_e) => {}
+            }
         }
+    }
+}
+
+/// Helper functions for communicating b/w single handler and engine using pipes.
+mod comms {
+    use anyhow::Error;
+    use lazy_static::lazy_static;
+    use nix::{
+        fcntl::OFlag,
+        unistd::{pipe2, read, write},
+    };
+
+    use serde::{Deserialize, Serialize};
+
+    /// All the signal data provided by signal handler
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct SignalData {
+        /// process id of the child
+        pub pid: i32,
+        /// user id of the child
+        pub uid: u32,
+        /// status of the child
+        pub status: i32,
+        /// errno of the child
+        pub errno: i32,
+        /// im not sure actually what code is
+        pub code: i32,
+    }
+
+    lazy_static! {
+        /// This pipe is used to send data b/w signal handler and engine.
+        ///
+        /// PIPES.0 - read fd
+        /// PIPES.1 - write fd
+        static ref PIPES: (i32, i32) = pipe2(OFlag::O_NONBLOCK).unwrap();
+    }
+
+    /// Read signal data from the pipe if any
+    ///
+    /// NOTE: Does not block
+    pub fn read_from_pipe() -> anyhow::Result<SignalData> {
+        // create a buffer and set the len
+        let mut buf = Vec::with_capacity(std::mem::size_of::<SignalData>());
+        unsafe { buf.set_len(std::mem::size_of::<SignalData>()) };
+        buf.fill(0);
+
+        let n_bytes = read(PIPES.0, &mut buf)?;
+
+        if n_bytes == 0 {
+            anyhow::bail!("Faild to read, probably invalid")
+        } else {
+            debug_assert!(n_bytes == buf.len());
+
+            let val = bincode::deserialize(&buf).map_err(|err| Error::msg(format!("{err}")))?;
+            Ok(val)
+        }
+    }
+
+    /// Write signal data to a pipe
+    ///
+    /// NOTE: Does not block
+    pub fn write_to_pipe(val: SignalData) -> anyhow::Result<()> {
+        let data = bincode::serialize(&val).map_err(|err| Error::msg(format!("{err}")))?;
+        let n_bytes = write(PIPES.1, &data)?;
+        debug_assert!(n_bytes == data.len());
+        Ok(())
     }
 }
