@@ -15,3 +15,5 @@ name = "neofetch"
 executable = "/usr/bin/neofetch"
 ```
 
+![screenshot of operator log](sc.png)
+
