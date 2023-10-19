@@ -1,15 +1,16 @@
 use nix::{
     errno::{self, errno},
     libc::{
-        dup2, open, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO, S_IRGRP, S_IRUSR,
-        S_IWGRP, S_IWUSR,
+        dup2, open, siginfo_t, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO, S_IRGRP,
+        S_IRUSR, S_IWGRP, S_IWUSR,
     },
+    sys::signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
     unistd::{fork, ForkResult},
 };
 
 use crate::service::Service;
 use log::{error, info};
-use std::{collections::HashMap, ffi::CString};
+use std::{collections::HashMap, ffi::CString, time::Duration};
 
 #[allow(dead_code)]
 /// Status of the service
@@ -50,14 +51,38 @@ impl Engine {
         }
     }
 
+    extern "C" fn signal_handler(
+        sig: std::ffi::c_int,
+        sip: *mut siginfo_t,
+        ctx: *mut std::ffi::c_void,
+    ) {
+        let sinfo = unsafe { sip.as_ref() };
+        info!("Child is dead: {sinfo:?}");
+    }
+
     /// Start the engine and manage the services
     pub fn run(&self) {
+        // setup a signal handler for SIGCHILD
+        let sa = SigAction::new(
+            nix::sys::signal::SigHandler::SigAction(Self::signal_handler),
+            SaFlags::SA_RESTART | SaFlags::SA_SIGINFO,
+            SigSet::empty(),
+        );
+
+        match unsafe { sigaction(Signal::SIGCHLD, &sa) } {
+            Ok(sigac) => {
+                info!("Signal handler registered: {sigac:?}");
+            }
+            Err(e) => {
+                error!("Failed to register signal handler: {e}");
+                return;
+            }
+        }
+
         for service in self.service_files.iter() {
             info!("Handing service creation for {service:?}");
             match unsafe { fork() }.unwrap() {
-                ForkResult::Parent { child } => {
-                    let status = nix::sys::wait::waitpid(child, None).unwrap();
-                    info!("Status {status:?}")
+                ForkResult::Parent { .. } => {
                     // TODO: book keep the process
                 }
                 ForkResult::Child => {
@@ -107,6 +132,10 @@ impl Engine {
                     let _res = unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
                 }
             }
+        }
+
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
 }

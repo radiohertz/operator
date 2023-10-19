@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 log = "0.4.20"
-nix = { version = "0.27.1", features = ["process"] }
+nix = { version = "0.27.1", features = ["process", "signal"] }
 serde =  { version = "1.0.189", features = ["derive"] }
 toml = "0.8.2"
 
