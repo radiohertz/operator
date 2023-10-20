@@ -10,7 +10,7 @@ anyhow = "1.0.75"
 bincode = "1.3.3"
 lazy_static = "1.4.0"
 log = "0.4.20"
-nix = { version = "0.27.1", features = ["process", "signal", "fs"] }
+nix = { version = "0.27.1", features = ["process", "poll", "signal", "fs"] }
 serde =  { version = "1.0.189", features = ["derive" ] }
 toml = "0.8.2"
 

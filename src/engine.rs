@@ -1,16 +1,19 @@
 use nix::{
-    errno::{self, errno},
+    errno::{self, errno, Errno},
     libc::{
         dup2, open, siginfo_t, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO, S_IRGRP,
         S_IRUSR, S_IWGRP, S_IWUSR,
     },
-    sys::signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
+    sys::{
+        select::{select, FdSet},
+        signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
+    },
     unistd::{fork, ForkResult},
 };
 
 use crate::service::Service;
 use log::{error, info};
-use std::{collections::HashMap, ffi::CString, time::Duration};
+use std::{collections::HashMap, ffi::CString};
 
 #[allow(dead_code)]
 /// Status of the service
@@ -147,7 +150,21 @@ impl Engine {
         }
 
         loop {
-            std::thread::sleep(Duration::from_millis(200));
+            // fd for the read end of the pipe
+            let r_fd = comms::read_fd();
+
+            // wait for notification to read from the pipe
+            let mut read_fds = FdSet::new();
+            read_fds.insert(&r_fd);
+
+            while let Err(e) = select(None, Some(&mut read_fds), None, None, None) {
+                match e {
+                    Errno::EINTR => continue,
+                    e => {
+                        panic!("select() failed with {e}");
+                    }
+                }
+            }
 
             // read from the pipe for childs that have exited
             match comms::read_from_pipe() {
@@ -163,12 +180,11 @@ impl Engine {
 
 /// Helper functions for communicating b/w single handler and engine using pipes.
 mod comms {
+    use std::os::fd::BorrowedFd;
+
     use anyhow::Error;
     use lazy_static::lazy_static;
-    use nix::{
-        fcntl::OFlag,
-        unistd::{pipe2, read, write},
-    };
+    use nix::unistd::{pipe, read, write};
 
     use serde::{Deserialize, Serialize};
 
@@ -192,7 +208,7 @@ mod comms {
         ///
         /// PIPES.0 - read fd
         /// PIPES.1 - write fd
-        static ref PIPES: (i32, i32) = pipe2(OFlag::O_NONBLOCK).unwrap();
+        static ref PIPES: (i32, i32) = pipe().unwrap();
     }
 
     /// Read signal data from the pipe if any
@@ -200,12 +216,9 @@ mod comms {
     /// NOTE: Does not block
     pub fn read_from_pipe() -> anyhow::Result<SignalData> {
         // create a buffer and set the len
-        let mut buf = Vec::with_capacity(std::mem::size_of::<SignalData>());
-        unsafe { buf.set_len(std::mem::size_of::<SignalData>()) };
-        buf.fill(0);
+        let mut buf = vec![0; std::mem::size_of::<SignalData>()];
 
         let n_bytes = read(PIPES.0, &mut buf)?;
-
         if n_bytes == 0 {
             anyhow::bail!("Faild to read, probably invalid")
         } else {
@@ -224,5 +237,10 @@ mod comms {
         let n_bytes = write(PIPES.1, &data)?;
         debug_assert!(n_bytes == data.len());
         Ok(())
+    }
+
+    /// Returns a BorrowedFd
+    pub fn read_fd<'a>() -> BorrowedFd<'a> {
+        unsafe { BorrowedFd::borrow_raw(PIPES.0) }
     }
 }
