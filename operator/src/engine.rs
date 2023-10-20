@@ -1,9 +1,6 @@
 use nix::{
-    errno::{self, errno, Errno},
-    libc::{
-        dup2, open, siginfo_t, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO, S_IRGRP,
-        S_IRUSR, S_IWGRP, S_IWUSR,
-    },
+    errno::Errno,
+    libc::siginfo_t,
     poll::{poll, PollFd, PollFlags},
     sys::{
         signal::{kill, sigaction, SaFlags, SigAction, SigSet, Signal},
@@ -19,9 +16,7 @@ use crate::{
 use log::{error, info, warn};
 use std::{
     collections::HashMap,
-    ffi::CString,
     os::fd::{AsFd, AsRawFd},
-    process::exit,
 };
 
 /// Handles the services
@@ -66,12 +61,7 @@ impl Engine {
             }
         }
 
-        let op_service_dir =
-            std::env::var("OP_SERVICE_DIR").unwrap_or_else(|_| "/tmp/op".to_string());
-        let op_service_log_dir =
-            std::env::var("OP_SERVICE_LOG_DIR").unwrap_or_else(|_| "/tmp/oplogs".to_string());
-
-        let service_files = Service::read_service_files(&op_service_dir).unwrap();
+        let service_files = Service::read_service_files().unwrap();
         for mut service in service_files.into_iter() {
             info!("Handing service creation for {service:?}");
             match unsafe { fork() }.unwrap() {
@@ -82,58 +72,7 @@ impl Engine {
                     self.services.insert(child.as_raw(), service);
                 }
                 ForkResult::Child => {
-                    info!("{}: executing {:?}", service.name, service.executable);
-
-                    let exe_path = CString::new(service.executable.to_str().unwrap()).unwrap();
-
-                    let mut args = if let Some(ref args) = service.args {
-                        [exe_path.as_ptr()]
-                            .into_iter()
-                            .chain(args.iter().map(|arg| arg.as_ptr()))
-                            .collect::<Vec<_>>()
-                    } else {
-                        vec![exe_path.as_ptr()]
-                    };
-
-                    // null terminate the args array
-                    args.push(core::ptr::null());
-
-                    // create the log file for the service
-                    let stdout_file_path =
-                        CString::new(format!("{}/{}.log", op_service_log_dir, service.name))
-                            .unwrap();
-                    let log_fd = unsafe {
-                        open(
-                            stdout_file_path.as_ptr(),
-                            O_WRONLY | O_CREAT | O_APPEND,
-                            (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) as std::ffi::c_uint,
-                        )
-                    };
-
-                    if log_fd == -1 {
-                        error!(
-                            "Failed to create log file {}",
-                            errno::Errno::from_i32(errno())
-                        );
-                    }
-
-                    info!(
-                        "Creating log file for {} at {:?} [FD {log_fd}]",
-                        service.name, stdout_file_path
-                    );
-
-                    // set the stdout and stderr to the log file
-                    unsafe {
-                        dup2(log_fd, STDOUT_FILENO);
-                        dup2(log_fd, STDERR_FILENO);
-                    }
-
-                    let res = unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
-                    if res == -1 {
-                        error!("exec() Failed with {res}");
-                        error!("errno: {}", Errno::from_i32(errno()));
-                        exit(-1)
-                    }
+                    service.start();
                 }
             }
         }
