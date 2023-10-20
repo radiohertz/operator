@@ -6,7 +6,7 @@ use nix::{
     },
     poll::{poll, PollFd, PollFlags},
     sys::{
-        signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
+        signal::{kill, sigaction, SaFlags, SigAction, SigSet, Signal},
         wait::{waitpid, WaitStatus},
     },
     unistd::{fork, ForkResult, Pid},
@@ -16,7 +16,7 @@ use crate::{
     ipc::{self, IPCMessage},
     service::Service,
 };
-use log::{error, info};
+use log::{error, info, warn};
 use std::{
     collections::HashMap,
     ffi::CString,
@@ -179,6 +179,10 @@ impl Engine {
                                         service.status =
                                             Some(crate::service::ServiceStatus::Stopped);
                                     }
+                                    WaitStatus::Signaled(_, _, _) => {
+                                        service.status =
+                                            Some(crate::service::ServiceStatus::Stopped);
+                                    }
                                     e => {
                                         info!("waitpid() returned {e:?}")
                                     }
@@ -193,7 +197,20 @@ impl Engine {
 
                         match msg {
                             IPCMessage::Start { .. } => {}
-                            IPCMessage::Stop { .. } => {}
+                            IPCMessage::Stop { name } => {
+                                if let Some((pid, _)) = self
+                                    .services
+                                    .iter()
+                                    .find(|(_, service)| service.name == name)
+                                {
+                                    info!("Asking service {name} to terminate.");
+                                    if let Err(e) = kill(Pid::from_raw(*pid), Signal::SIGTERM) {
+                                        error!("kill() failed with {e}");
+                                    }
+                                } else {
+                                    warn!("No service found to kill")
+                                }
+                            }
                             IPCMessage::Status { name } => {
                                 if let Some((pid, service)) =
                                     self.services.iter().find(|(_, v)| v.name == name)
