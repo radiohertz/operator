@@ -5,51 +5,36 @@ use nix::{
         S_IRUSR, S_IWGRP, S_IWUSR,
     },
     poll::{poll, PollFd, PollFlags},
-    sys::signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
-    unistd::{fork, ForkResult},
+    sys::{
+        signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
+        wait::{waitpid, WaitStatus},
+    },
+    unistd::{fork, ForkResult, Pid},
 };
 
-use crate::service::Service;
+use crate::{
+    ipc::{self, IPCMessage},
+    service::Service,
+};
 use log::{error, info};
-use std::{collections::HashMap, ffi::CString};
-
-#[allow(dead_code)]
-/// Status of the service
-pub enum ServiceStatus {
-    /// The service is running
-    Running,
-    /// The service exited
-    Finished,
-}
+use std::{
+    collections::HashMap,
+    ffi::CString,
+    os::fd::{AsFd, AsRawFd},
+    process::exit,
+};
 
 /// Handles the services
+#[derive(Default)]
 pub struct Engine {
-    service_files: Vec<Service>,
-    _db: HashMap<Service, ServiceStatus>,
-    #[allow(dead_code)]
-    op_service_dir: String,
-    op_service_log_dir: String,
+    services: HashMap<i32, Service>,
 }
 
 impl Engine {
     /// Create a new service runner engine
     pub fn new() -> Self {
         info!("Creating a new Engine...");
-
-        let op_service_dir =
-            std::env::var("OP_SERVICE_DIR").unwrap_or_else(|_| "/tmp/op".to_string());
-
-        let op_service_log_dir =
-            std::env::var("OP_SERVICE_LOG_DIR").unwrap_or_else(|_| "/tmp/oplogs".to_string());
-
-        let service_files = Service::read_service_files(&op_service_dir).unwrap();
-
-        Self {
-            service_files,
-            op_service_dir,
-            op_service_log_dir,
-            _db: HashMap::new(),
-        }
+        Self::default()
     }
 
     extern "C" fn signal_handler(
@@ -57,24 +42,13 @@ impl Engine {
         s_info: *mut siginfo_t,
         _ctx: *mut std::ffi::c_void,
     ) {
-        let s_info = unsafe { s_info.as_ref() }.unwrap();
-        let data = unsafe {
-            comms::SignalData {
-                pid: s_info.si_pid(),
-                uid: s_info.si_uid(),
-                status: s_info.si_status(),
-                errno: s_info.si_errno,
-                code: s_info.si_code,
-            }
-        };
-
-        if let Err(e) = comms::write_to_pipe(data) {
+        if let Err(e) = comms::write_to_pipe(unsafe { s_info.as_ref().unwrap().si_pid() }) {
             error!("Failed to write to pipe: {e}");
         }
     }
 
     /// Start the engine and manage the services
-    pub fn run(&self) {
+    pub fn run(&mut self) {
         // setup a signal handler for SIGCHILD
         let sa = SigAction::new(
             nix::sys::signal::SigHandler::SigAction(Self::signal_handler),
@@ -92,18 +66,27 @@ impl Engine {
             }
         }
 
-        for service in self.service_files.iter() {
+        let op_service_dir =
+            std::env::var("OP_SERVICE_DIR").unwrap_or_else(|_| "/tmp/op".to_string());
+        let op_service_log_dir =
+            std::env::var("OP_SERVICE_LOG_DIR").unwrap_or_else(|_| "/tmp/oplogs".to_string());
+
+        let service_files = Service::read_service_files(&op_service_dir).unwrap();
+        for mut service in service_files.into_iter() {
             info!("Handing service creation for {service:?}");
             match unsafe { fork() }.unwrap() {
-                ForkResult::Parent { .. } => {
-                    // TODO: book keep the process
+                ForkResult::Parent { child } => {
+                    service.status = Some(crate::service::ServiceStatus::Running);
+                    service.pid = Some(child.as_raw());
+
+                    self.services.insert(child.as_raw(), service);
                 }
                 ForkResult::Child => {
                     info!("{}: executing {:?}", service.name, service.executable);
 
                     let exe_path = CString::new(service.executable.to_str().unwrap()).unwrap();
 
-                    let args = if let Some(ref args) = service.args {
+                    let mut args = if let Some(ref args) = service.args {
                         [exe_path.as_ptr()]
                             .into_iter()
                             .chain(args.iter().map(|arg| arg.as_ptr()))
@@ -112,9 +95,12 @@ impl Engine {
                         vec![exe_path.as_ptr()]
                     };
 
+                    // null terminate the args array
+                    args.push(core::ptr::null());
+
                     // create the log file for the service
                     let stdout_file_path =
-                        CString::new(format!("{}/{}.log", self.op_service_log_dir, service.name))
+                        CString::new(format!("{}/{}.log", op_service_log_dir, service.name))
                             .unwrap();
                     let log_fd = unsafe {
                         open(
@@ -142,16 +128,28 @@ impl Engine {
                         dup2(log_fd, STDERR_FILENO);
                     }
 
-                    let _res = unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
+                    let res = unsafe { nix::libc::execv(exe_path.as_ptr(), args.as_ptr()) };
+                    if res == -1 {
+                        error!("exec() Failed with {res}");
+                        error!("errno: {}", Errno::from_i32(errno()));
+                        exit(-1)
+                    }
                 }
             }
         }
 
+        let ipc_server = ipc::IPCServer::new().unwrap();
+
         // fd for the read end of the pipe
         let r_fd = comms::read_fd();
+        let ipc_fd = ipc_server.as_fd();
         loop {
             // wait for notification to read from the pipe
-            let mut fds = vec![PollFd::new(&r_fd, PollFlags::POLLIN)];
+            let mut fds = vec![
+                PollFd::new(&r_fd, PollFlags::POLLIN),
+                PollFd::new(&ipc_fd, PollFlags::POLLIN),
+            ];
+
             while let Err(e) = poll(&mut fds, -1) {
                 match e {
                     Errno::EINTR => continue,
@@ -161,13 +159,59 @@ impl Engine {
                 }
             }
 
-            // read from the pipe for childs that have exited
-            match comms::read_from_pipe() {
-                Ok(val) => {
-                    // TODO: update child process status
-                    info!("Got signal data: {val:?}");
+            for fd in fds {
+                if fd.revents().unwrap().bits() >= 1 {
+                    if fd.as_fd().as_raw_fd() == r_fd.as_raw_fd() {
+                        //  this is the pipe fd
+                        // read from the pipe for childs that have exited
+                        if let Ok(pid) = comms::read_from_pipe() {
+                            let wait_stat = match waitpid(Pid::from_raw(pid), None) {
+                                Ok(ws) => ws,
+                                Err(e) => {
+                                    error!("waitpid() for PID {} failed : {e}.", pid);
+                                    continue;
+                                }
+                            };
+
+                            if let Some(service) = self.services.get_mut(&pid) {
+                                match wait_stat {
+                                    WaitStatus::Exited(_, _) => {
+                                        service.status =
+                                            Some(crate::service::ServiceStatus::Stopped);
+                                    }
+                                    e => {
+                                        info!("waitpid() returned {e:?}")
+                                    }
+                                }
+                            }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        let stream = ipc_server.accept().unwrap();
+                        let msg = stream.read().unwrap();
+
+                        match msg {
+                            IPCMessage::Start { .. } => {}
+                            IPCMessage::Stop { .. } => {}
+                            IPCMessage::Status { name } => {
+                                if let Some((pid, service)) =
+                                    self.services.iter().find(|(_, v)| v.name == name)
+                                {
+                                    stream
+                                        .write(&IPCMessage::StatusResponse(Some((
+                                            *pid,
+                                            service.status.unwrap(),
+                                        ))))
+                                        .unwrap();
+                                } else {
+                                    stream.write(&IPCMessage::StatusResponse(None)).unwrap();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                Err(_e) => {}
             }
         }
     }
@@ -177,7 +221,6 @@ impl Engine {
 mod comms {
     use std::os::fd::BorrowedFd;
 
-    use anyhow::Error;
     use lazy_static::lazy_static;
     use nix::unistd::{pipe, read, write};
 
@@ -209,28 +252,25 @@ mod comms {
     /// Read signal data from the pipe if any
     ///
     /// NOTE: Does not block
-    pub fn read_from_pipe() -> anyhow::Result<SignalData> {
-        // create a buffer and set the len
-        let mut buf = vec![0; std::mem::size_of::<SignalData>()];
-
+    pub fn read_from_pipe() -> anyhow::Result<i32> {
+        let mut buf = [0; 4];
         let n_bytes = read(PIPES.0, &mut buf)?;
+
         if n_bytes == 0 {
             anyhow::bail!("Faild to read, probably invalid")
         } else {
             debug_assert!(n_bytes == buf.len());
-
-            let val = bincode::deserialize(&buf).map_err(|err| Error::msg(format!("{err}")))?;
-            Ok(val)
+            Ok(i32::from_le_bytes(buf))
         }
     }
 
     /// Write signal data to a pipe
     ///
     /// NOTE: Does not block
-    pub fn write_to_pipe(val: SignalData) -> anyhow::Result<()> {
-        let data = bincode::serialize(&val).map_err(|err| Error::msg(format!("{err}")))?;
-        let n_bytes = write(PIPES.1, &data)?;
-        debug_assert!(n_bytes == data.len());
+    #[inline]
+    pub fn write_to_pipe(val: i32) -> anyhow::Result<()> {
+        let n_bytes = write(PIPES.1, &val.to_le_bytes())?;
+        debug_assert!(n_bytes == std::mem::size_of::<i32>());
         Ok(())
     }
 

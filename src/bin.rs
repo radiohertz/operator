@@ -1,13 +1,10 @@
-mod engine;
-mod log;
-mod service;
+use operator::{engine::Engine, log};
 
 fn main() {
     // setup logging
     log::init().unwrap();
 
     // create an engine
-    let engine = engine::Engine::new();
-
+    let mut engine = Engine::new();
     engine.run();
 }
