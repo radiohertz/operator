@@ -4,10 +4,8 @@ use nix::{
         dup2, open, siginfo_t, O_APPEND, O_CREAT, O_WRONLY, STDERR_FILENO, STDOUT_FILENO, S_IRGRP,
         S_IRUSR, S_IWGRP, S_IWUSR,
     },
-    sys::{
-        select::{select, FdSet},
-        signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
-    },
+    poll::{poll, PollFd, PollFlags},
+    sys::signal::{sigaction, SaFlags, SigAction, SigSet, Signal},
     unistd::{fork, ForkResult},
 };
 
@@ -149,15 +147,12 @@ impl Engine {
             }
         }
 
+        // fd for the read end of the pipe
+        let r_fd = comms::read_fd();
         loop {
-            // fd for the read end of the pipe
-            let r_fd = comms::read_fd();
-
             // wait for notification to read from the pipe
-            let mut read_fds = FdSet::new();
-            read_fds.insert(&r_fd);
-
-            while let Err(e) = select(None, Some(&mut read_fds), None, None, None) {
+            let mut fds = vec![PollFd::new(&r_fd, PollFlags::POLLIN)];
+            while let Err(e) = poll(&mut fds, -1) {
                 match e {
                     Errno::EINTR => continue,
                     e => {
