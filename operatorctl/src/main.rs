@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use operator::{
     ipc::{IPCMessage, IPCStream},
-    service::ServiceStatus,
+    service,
 };
 
 #[derive(Parser)]
@@ -38,8 +38,8 @@ fn main() {
                     println!("{}", format!("{name}.service").green());
                     println!("{}", format!("pid: {pid}").green());
                     let status = match status {
-                        ServiceStatus::Running => "running".green(),
-                        ServiceStatus::Stopped => "stopped".red(),
+                        service::Status::Running => "running".green(),
+                        service::Status::Stopped => "stopped".red(),
                         _ => "unknow".red(),
                     };
                     println!("{}", format!("status: {}", status).green());

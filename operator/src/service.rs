@@ -11,7 +11,7 @@ use nix::libc::{
 
 /// Status of the service
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub enum ServiceStatus {
+pub enum Status {
     /// The service is running
     Running,
     /// The service Stopped
@@ -36,7 +36,7 @@ pub struct Service {
 
     /// The status of the running service
     #[serde(skip)]
-    pub status: Option<ServiceStatus>,
+    pub status: Option<Status>,
 
     /// The exit code of the service if it exited
     #[serde(skip)]

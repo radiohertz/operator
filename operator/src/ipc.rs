@@ -12,7 +12,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::service::ServiceStatus;
+use crate::service;
 
 /// Message format used to communicate b/w operator and operatorctl.
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub enum IPCMessage {
     Status { name: String },
 
     /// Response for the [IPCMessage::Status] command.
-    StatusResponse(Option<(i32, ServiceStatus)>),
+    StatusResponse(Option<(i32, service::Status)>),
 }
 
 /// An Unix socket stream.

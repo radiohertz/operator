@@ -72,7 +72,7 @@ impl Engine {
 
             match unsafe { fork() }.unwrap() {
                 ForkResult::Parent { child } => {
-                    service.status = Some(crate::service::ServiceStatus::Running);
+                    service.status = Some(crate::service::Status::Running);
                     service.pid = Some(child.as_raw());
 
                     self.services.insert(child.as_raw(), service);
@@ -124,10 +124,10 @@ impl Engine {
                         if let Some(service) = self.services.get_mut(&pid) {
                             match wait_stat {
                                 WaitStatus::Exited(_, _) => {
-                                    service.status = Some(crate::service::ServiceStatus::Stopped);
+                                    service.status = Some(crate::service::Status::Stopped);
                                 }
                                 WaitStatus::Signaled(_, _, _) => {
-                                    service.status = Some(crate::service::ServiceStatus::Stopped);
+                                    service.status = Some(crate::service::Status::Stopped);
                                 }
                                 e => {
                                     info!("waitpid() returned {e:?}")
