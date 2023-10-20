@@ -1,5 +1,6 @@
 use log::{Level, Metadata, Record, SetLoggerError};
 
+/// Logging for operator.
 struct Logger;
 
 impl log::Log for Logger {
@@ -23,6 +24,7 @@ impl log::Log for Logger {
 
 static LOGGER: Logger = Logger;
 
+/// Init logging for operator.
 pub fn init() -> Result<(), SetLoggerError> {
     log::set_logger(&LOGGER).map(|()| log::set_max_level(log::LevelFilter::Info))
 }

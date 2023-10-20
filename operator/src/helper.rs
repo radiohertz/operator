@@ -1,3 +1,5 @@
+//! This module contains helpers used by operator and operatorctl.
+
 /// Directory where the service files are located.
 ///
 /// This can be set by the `OP_SERVICE_DIR` env var.

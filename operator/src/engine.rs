@@ -19,30 +19,35 @@ use std::{
     os::fd::{AsFd, AsRawFd},
 };
 
-/// Handles the services
+/// Service handler for operator.
+///
+/// It Handles creation, termination, book-keeping  of the services.
 #[derive(Default)]
 pub struct Engine {
+    /// list of all services loaded by operator.
     services: HashMap<i32, Service>,
 }
 
 impl Engine {
-    /// Create a new service runner engine
+    /// Create a new engine.
     pub fn new() -> Self {
         info!("Creating a new Engine...");
         Self::default()
     }
 
+    /// handler for SIGCHILD.
     extern "C" fn signal_handler(
-        _sig: std::ffi::c_int,
+        _: std::ffi::c_int,
         s_info: *mut siginfo_t,
-        _ctx: *mut std::ffi::c_void,
+        _: *mut std::ffi::c_void,
     ) {
+        // since signals are not reentrant safe, we just pipe the pid to engine.
         if let Err(e) = comms::write_to_pipe(unsafe { s_info.as_ref().unwrap().si_pid() }) {
             error!("Failed to write to pipe: {e}");
         }
     }
 
-    /// Start the engine and manage the services
+    /// Start the engine and manage the services.
     pub fn run(&mut self) {
         // setup a signal handler for SIGCHILD
         let sa = SigAction::new(
@@ -64,6 +69,7 @@ impl Engine {
         let service_files = Service::read_service_files().unwrap();
         for mut service in service_files.into_iter() {
             info!("Handing service creation for {service:?}");
+
             match unsafe { fork() }.unwrap() {
                 ForkResult::Parent { child } => {
                     service.status = Some(crate::service::ServiceStatus::Running);
@@ -77,13 +83,13 @@ impl Engine {
             }
         }
 
+        // create an ipc server for comms b/w operator and operatorctl.
         let ipc_server = ipc::IPCServer::new().unwrap();
 
-        // fd for the read end of the pipe
+        // we are polling on the read-end of the pipe in the signal handler and the ipc server.
         let r_fd = comms::read_fd();
         let ipc_fd = ipc_server.as_fd();
         loop {
-            // wait for notification to read from the pipe
             let mut fds = vec![
                 PollFd::new(&r_fd, PollFlags::POLLIN),
                 PollFd::new(&ipc_fd, PollFlags::POLLIN),
@@ -99,73 +105,73 @@ impl Engine {
             }
 
             for fd in fds {
-                if fd.revents().unwrap().bits() >= 1 {
-                    if fd.as_fd().as_raw_fd() == r_fd.as_raw_fd() {
-                        //  this is the pipe fd
-                        // read from the pipe for childs that have exited
-                        if let Ok(pid) = comms::read_from_pipe() {
-                            let wait_stat = match waitpid(Pid::from_raw(pid), None) {
-                                Ok(ws) => ws,
-                                Err(e) => {
-                                    error!("waitpid() for PID {} failed : {e}.", pid);
-                                    continue;
-                                }
-                            };
+                // fds that ready to be processed have revents value that is non zero.
+                if fd.revents().unwrap().bits() < 1 {
+                    continue;
+                }
 
-                            if let Some(service) = self.services.get_mut(&pid) {
-                                match wait_stat {
-                                    WaitStatus::Exited(_, _) => {
-                                        service.status =
-                                            Some(crate::service::ServiceStatus::Stopped);
-                                    }
-                                    WaitStatus::Signaled(_, _, _) => {
-                                        service.status =
-                                            Some(crate::service::ServiceStatus::Stopped);
-                                    }
-                                    e => {
-                                        info!("waitpid() returned {e:?}")
-                                    }
+                if fd.as_fd().as_raw_fd() == r_fd.as_raw_fd() {
+                    // read from the pipe for childs that have exited
+                    if let Ok(pid) = comms::read_from_pipe() {
+                        let wait_stat = match waitpid(Pid::from_raw(pid), None) {
+                            Ok(ws) => ws,
+                            Err(e) => {
+                                error!("waitpid() for PID {} failed : {e}.", pid);
+                                continue;
+                            }
+                        };
+
+                        if let Some(service) = self.services.get_mut(&pid) {
+                            match wait_stat {
+                                WaitStatus::Exited(_, _) => {
+                                    service.status = Some(crate::service::ServiceStatus::Stopped);
+                                }
+                                WaitStatus::Signaled(_, _, _) => {
+                                    service.status = Some(crate::service::ServiceStatus::Stopped);
+                                }
+                                e => {
+                                    info!("waitpid() returned {e:?}")
                                 }
                             }
-                        } else {
-                            continue;
                         }
                     } else {
-                        let stream = ipc_server.accept().unwrap();
-                        let msg = stream.read().unwrap();
+                        continue;
+                    }
+                } else {
+                    let stream = ipc_server.accept().unwrap();
+                    let msg = stream.read().unwrap();
 
-                        match msg {
-                            IPCMessage::Start { .. } => {}
-                            IPCMessage::Stop { name } => {
-                                if let Some((pid, _)) = self
-                                    .services
-                                    .iter()
-                                    .find(|(_, service)| service.name == name)
-                                {
-                                    info!("Asking service {name} to terminate.");
-                                    if let Err(e) = kill(Pid::from_raw(*pid), Signal::SIGTERM) {
-                                        error!("kill() failed with {e}");
-                                    }
-                                } else {
-                                    warn!("No service found to kill")
+                    match msg {
+                        IPCMessage::Start { .. } => {}
+                        IPCMessage::Stop { name } => {
+                            if let Some((pid, _)) = self
+                                .services
+                                .iter()
+                                .find(|(_, service)| service.name == name)
+                            {
+                                info!("Asking service {name} to terminate.");
+                                if let Err(e) = kill(Pid::from_raw(*pid), Signal::SIGTERM) {
+                                    error!("kill() failed with {e}");
                                 }
+                            } else {
+                                warn!("No service found to kill")
                             }
-                            IPCMessage::Status { name } => {
-                                if let Some((pid, service)) =
-                                    self.services.iter().find(|(_, v)| v.name == name)
-                                {
-                                    stream
-                                        .write(&IPCMessage::StatusResponse(Some((
-                                            *pid,
-                                            service.status.unwrap(),
-                                        ))))
-                                        .unwrap();
-                                } else {
-                                    stream.write(&IPCMessage::StatusResponse(None)).unwrap();
-                                }
-                            }
-                            _ => {}
                         }
+                        IPCMessage::Status { name } => {
+                            if let Some((pid, service)) =
+                                self.services.iter().find(|(_, v)| v.name == name)
+                            {
+                                stream
+                                    .write(&IPCMessage::StatusResponse(Some((
+                                        *pid,
+                                        service.status.unwrap(),
+                                    ))))
+                                    .unwrap();
+                            } else {
+                                stream.write(&IPCMessage::StatusResponse(None)).unwrap();
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
